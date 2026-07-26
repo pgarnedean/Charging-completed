@@ -7,23 +7,24 @@
     <style>
         body { font-family: sans-serif; text-align: center; margin-top: 20px; }
         canvas { border: 1px solid #333; max-width: 100%; height: auto; margin-top: 10px; }
-        #status { font-weight: bold; color: #d35400; font-size: 1.2em; }
-        button { padding: 10px 20px; font-size: 1em; cursor: pointer; }
+        #status { font-weight: bold; color: #d35400; font-size: 1.2em; margin: 10px; line-height: 1.5; }
+        button { padding: 15px 30px; font-size: 1.2em; cursor: pointer; border-radius: 8px; background-color: #3498db; color: white; border: none; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
     </style>
 </head>
 <body>
     <h2>充電ランプ検知ツール</h2>
-    <p id="status">画像認識システム（OpenCV.js）を読み込み中...</p>
+    <p id="status">画像認識システムを読み込み中...<br>（数秒〜十数秒お待ちください）</p>
     <button id="startBtn" disabled>カメラを起動する</button>
     
     <audio id="alertSound" src="sound.mp3" preload="auto"></audio>
 
     <div>
-        <video id="video" width="640" height="480" autoplay playsinline style="display:none;"></video>
-        <canvas id="canvas" width="640" height="480"></canvas>
+        <video id="video" autoplay playsinline muted style="display:none;"></video>
+        <canvas id="canvas"></canvas>
     </div>
 
-    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();"></script>
+    <script src="https://docs.opencv.org/4.5.4/opencv.js" type="text/javascript"></script>
     
     <script>
         let video = document.getElementById('video');
@@ -38,129 +39,155 @@
 
         let src, dst, hsv, maskYellow, maskGreen, cap;
 
-        // OpenCV.jsの準備完了を待つ
-        function onOpenCvReady() {
-            cv['onRuntimeInitialized'] = () => {
-                statusText.innerText = "準備完了。カメラを起動して充電器を映してください。";
+        // 【修正1】OpenCV.jsのロード完了を確実に監視する
+        let cvCheckInterval = setInterval(() => {
+            if (typeof cv !== 'undefined' && typeof cv.Mat !== 'undefined') {
+                clearInterval(cvCheckInterval);
+                statusText.innerHTML = "準備完了！<br>カメラを起動してください。";
                 statusText.style.color = "black";
                 startBtn.disabled = false;
-            };
-        }
+            }
+        }, 500);
 
         // カメラ起動ボタンの処理
         startBtn.addEventListener('click', () => {
+            // 【修正3】iOS対策: ボタンを押した瞬間に無音で再生し、音声ブロックを解除する
+            alertSound.play().then(() => {
+                alertSound.pause();
+                alertSound.currentTime = 0;
+            }).catch(e => console.log("音声の事前ロードエラー:", e));
+
             if (!streaming) {
-                // 背面カメラを優先して起動
+                // 背面カメラを起動
                 navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
                     .then(function(stream) {
                         video.srcObject = stream;
                         video.play();
-                        streaming = true;
-                        startBtn.style.display = "none";
-                        statusText.innerText = "カメラ起動中。オレンジ/黄色のランプを枠内に映してください。";
-
-                        // OpenCVの行列を初期化
-                        src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
-                        dst = new cv.Mat(video.height, video.width, cv.CV_8UC4);
-                        hsv = new cv.Mat(video.height, video.width, cv.CV_8UC3);
-                        maskYellow = new cv.Mat(video.height, video.width, cv.CV_8UC1);
-                        maskGreen = new cv.Mat(video.height, video.width, cv.CV_8UC1);
-                        cap = new cv.VideoCapture(video);
-
-                        requestAnimationFrame(processVideo);
                     })
                     .catch(function(err) {
-                        alert("カメラの起動に失敗しました。ブラウザのカメラ権限を確認してください。");
+                        alert("カメラの起動に失敗しました。iPhoneの設定アプリからSafariのカメラ権限がオンになっているか確認してください。");
+                        console.error(err);
                     });
             }
         });
+
+        // 【修正2】ビデオの再生準備が整ったら（カメラの実際の解像度が確定したら）処理開始
+        video.addEventListener('canplay', function(ev){
+            if (!streaming) {
+                let width = video.videoWidth;
+                let height = video.videoHeight;
+                
+                // キャンバスのサイズを実際のビデオサイズ（iPhoneの縦横）に合わせる
+                video.setAttribute('width', width);
+                video.setAttribute('height', height);
+                canvas.width = width;
+                canvas.height = height;
+                
+                streaming = true;
+                startBtn.style.display = "none";
+                statusText.innerHTML = "カメラ起動中。<br>黄色のランプを枠内に映してください。";
+
+                // OpenCVの行列を初期化
+                src = new cv.Mat(height, width, cv.CV_8UC4);
+                dst = new cv.Mat(height, width, cv.CV_8UC4);
+                hsv = new cv.Mat(height, width, cv.CV_8UC3);
+                maskYellow = new cv.Mat(height, width, cv.CV_8UC1);
+                maskGreen = new cv.Mat(height, width, cv.CV_8UC1);
+                cap = new cv.VideoCapture(video);
+
+                requestAnimationFrame(processVideo);
+            }
+        }, false);
 
         // 映像フレームごとの処理
         function processVideo() {
             if (!streaming) return;
 
-            cap.read(src);
-            src.copyTo(dst);
-            
-            // 色空間をRGBからHSVに変換（色を検出しやすくするため）
-            cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+            try {
+                cap.read(src);
+                src.copyTo(dst);
+                
+                // 色空間をRGBからHSVに変換
+                cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+                cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // ==========================================
-            // 1. 黄色（CHARGEランプ）の検出
-            // ※環境光やカメラによってHSVの数値を微調整する必要があります
-            // ==========================================
-            let lowYellow = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [10, 100, 100, 0]); // 下限
-            let highYellow = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 255, 255, 0]); // 上限
-            cv.inRange(hsv, lowYellow, highYellow, maskYellow);
+                // ==========================================
+                // 1. 黄色（CHARGEランプ）の検出
+                // ==========================================
+                let lowYellow = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15, 100, 100, 0]);
+                let highYellow = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 255, 255, 0]);
+                cv.inRange(hsv, lowYellow, highYellow, maskYellow);
 
-            // ==========================================
-            // 2. 緑色（FULLランプ）の検出
-            // ==========================================
-            let lowGreen = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [40, 100, 100, 0]);
-            let highGreen = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [85, 255, 255, 0]);
-            cv.inRange(hsv, lowGreen, highGreen, maskGreen);
+                // ==========================================
+                // 2. 緑色（FULLランプ）の検出
+                // 写真の明るい黄緑色に合わせて範囲を調整しました
+                // ==========================================
+                let lowGreen = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 100, 100, 0]);
+                let highGreen = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [85, 255, 255, 0]);
+                cv.inRange(hsv, lowGreen, highGreen, maskGreen);
 
-            // 輪郭抽出用
-            let contoursYellow = new cv.MatVector();
-            let hierarchyYellow = new cv.Mat();
-            cv.findContours(maskYellow, contoursYellow, hierarchyYellow, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+                // 輪郭抽出用
+                let contoursYellow = new cv.MatVector();
+                let hierarchyYellow = new cv.Mat();
+                cv.findContours(maskYellow, contoursYellow, hierarchyYellow, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-            let isYellowNow = false;
+                let isYellowNow = false;
 
-            // 黄色の光を白い四角で囲む処理
-            for (let i = 0; i < contoursYellow.size(); ++i) {
-                let cnt = contoursYellow.get(i);
-                let area = cv.contourArea(cnt);
-                if (area > 30) { // ノイズを除外するための最小面積
-                    isYellowNow = true;
-                    yellowWasDetected = true; // 過去に黄色を検出したフラグを立てる
-                    let rect = cv.boundingRect(cnt);
-                    let point1 = new cv.Point(rect.x, rect.y);
-                    let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                    // 白い四角 (R:255, G:255, B:255) で線の太さ2
-                    cv.rectangle(dst, point1, point2, [255, 255, 255, 255], 2);
+                // 黄色の光を白い四角で囲む処理
+                for (let i = 0; i < contoursYellow.size(); ++i) {
+                    let cnt = contoursYellow.get(i);
+                    let area = cv.contourArea(cnt);
+                    if (area > 30) { // 小さすぎるノイズは無視
+                        isYellowNow = true;
+                        yellowWasDetected = true;
+                        let rect = cv.boundingRect(cnt);
+                        let point1 = new cv.Point(rect.x, rect.y);
+                        let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
+                        cv.rectangle(dst, point1, point2, [255, 255, 255, 255], 3); // 白枠を描画
+                    }
+                    cnt.delete();
                 }
-                cnt.delete();
-            }
 
-            // 緑色の検出確認
-            let contoursGreen = new cv.MatVector();
-            let hierarchyGreen = new cv.Mat();
-            cv.findContours(maskGreen, contoursGreen, hierarchyGreen, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+                // 緑色の検出確認
+                let contoursGreen = new cv.MatVector();
+                let hierarchyGreen = new cv.Mat();
+                cv.findContours(maskGreen, contoursGreen, hierarchyGreen, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-            let isGreenNow = false;
-            for (let i = 0; i < contoursGreen.size(); ++i) {
-                let cnt = contoursGreen.get(i);
-                if (cv.contourArea(cnt) > 30) {
-                    isGreenNow = true;
+                let isGreenNow = false;
+                for (let i = 0; i < contoursGreen.size(); ++i) {
+                    let cnt = contoursGreen.get(i);
+                    if (cv.contourArea(cnt) > 30) {
+                        isGreenNow = true;
+                    }
+                    cnt.delete();
                 }
-                cnt.delete();
+
+                // 状態に応じた処理とテキスト表示
+                if (isYellowNow) {
+                    statusText.innerText = "充電中（黄色のランプを検出中）...";
+                    statusText.style.color = "#d35400";
+                } else if (yellowWasDetected && isGreenNow && !audioPlayed) {
+                    statusText.innerText = "充電完了！音声を再生しました。";
+                    statusText.style.color = "green";
+                    alertSound.play();
+                    audioPlayed = true; // 1回だけ再生
+                } else if (yellowWasDetected && !isYellowNow && !isGreenNow && !audioPlayed) {
+                    statusText.innerText = "黄色のランプが消えました。緑の点灯を待機中...";
+                    statusText.style.color = "gray";
+                }
+
+                // メモリ解放（重要）
+                contoursYellow.delete(); hierarchyYellow.delete();
+                contoursGreen.delete(); hierarchyGreen.delete();
+                lowYellow.delete(); highYellow.delete();
+                lowGreen.delete(); highGreen.delete();
+
+                // キャンバスに映像を反映
+                cv.imshow('canvas', dst);
+            } catch (err) {
+                // エラー時はコンソールに逃がしてクラッシュを防ぐ
             }
 
-            // 状態に応じた処理とテキスト表示
-            if (isYellowNow) {
-                statusText.innerText = "充電中（黄色のランプを検出中）...";
-                statusText.style.color = "#d35400";
-            } else if (yellowWasDetected && isGreenNow && !audioPlayed) {
-                // 黄色が消えて、緑がついた時
-                statusText.innerText = "充電完了！音声を再生しました。";
-                statusText.style.color = "green";
-                alertSound.play();
-                audioPlayed = true; // 重複再生を防ぐ
-            } else if (yellowWasDetected && !isYellowNow && !isGreenNow && !audioPlayed) {
-                statusText.innerText = "黄色のランプが消えました。緑の点灯を待機中...";
-                statusText.style.color = "gray";
-            }
-
-            // メモリ解放（重要）
-            contoursYellow.delete(); hierarchyYellow.delete();
-            contoursGreen.delete(); hierarchyGreen.delete();
-            lowYellow.delete(); highYellow.delete();
-            lowGreen.delete(); highGreen.delete();
-
-            // キャンバスに描画
-            cv.imshow('canvas', dst);
             requestAnimationFrame(processVideo);
         }
     </script>
